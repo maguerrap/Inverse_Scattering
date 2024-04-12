@@ -78,9 +78,9 @@ def _assert(cond, msg):
 
 @flax.struct.dataclass
 class Weights:
+    n:jnp.int32=1
 
-
-    def fd_weights_all(self, x, x0=0, n=1):
+    def fd_weights_all(self, x, x0=0):
         """
         Return finite difference weights for derivatives of all orders up to n.
 
@@ -118,19 +118,19 @@ class Weights:
         http://www.scholarpedia.org/article/Finite_difference_method
         """
         m = len(x)
-        _assert(n < m, 'len(x) must be larger than n')
+        _assert(self.n < m, 'len(x) must be larger than n')
 
-        weights = jnp.zeros((m, n + 1))
-        weights = self._fd_weights_all(weights, x, x0, n)
+        weights = jnp.zeros((m, self.n + 1))
+        weights = self._fd_weights_all(weights, x, x0)
         return weights.T
 
 
-    def _fd_weights_all(self, weights: jax.Array, x, x0, n):
+    def _fd_weights_all(self, weights: jax.Array, x, x0=0):
         m = len(x)
         c_1, c_4 = 1, x[0] - x0
         weights = weights.at[0, 0].set(1)
         for i in range(1, m):
-            j = jnp.arange(0, jnp.minimum(i, n) + 1)
+            j = jnp.arange(0, jnp.minimum(i, self.n) + 1)
             c_2, c_5, c_4 = 1, c_4, x[i] - x0
             for v in range(i):
                 c_3 = x[i] - x[v]
@@ -141,7 +141,7 @@ class Weights:
         return weights
 
     def __call__(self):
-        def fd_weights(x, x0=0, n=1):
+        def fd_weights(x, x0=0):
             """
             Return finite difference weights for the n'th derivative.
 
@@ -169,7 +169,7 @@ class Weights:
             --------
             fd_weights_all
             """
-            return self.fd_weights_all(x, x0, n)[-1]
+            return self.fd_weights_all(x, x0)[-1]
         return fd_weights
 
 
@@ -196,27 +196,27 @@ def DistribPML(nx:jnp.int32,ny:jnp.int32,nPML:jnp.int32,fac:jnp.int32) -> jax.Ar
 
 
 def FirstOrderDifferenceMatrix1d(nx,h,order):
-    fdweights = Weights()
-    Dx = sp.sparse.spdiags(jnp.tile(fdweights()(np.arange(order+1), order/2,1)/h,(nx,1)).T,
+    fdweights = Weights(1)
+    Dx = sp.sparse.spdiags(jnp.tile(fdweights()(np.arange(order+1), order/2)/h,(nx,1)).T,
                            jnp.arange(-(order/2),(order/2)+1),(nx,nx)).tolil()
     for i in range(int(order/2)-1):
-        weights = fdweights()(jnp.arange(0,order+3),i+1,1)/h
+        weights = fdweights()(jnp.arange(0,order+3),i+1)/h
         Dx[i,:order+2] = weights[1:]
 
-        weights = fdweights()(jnp.arange(order+3),order+2-(i+1),1)/h
+        weights = fdweights()(jnp.arange(order+3),order+2-(i+1))/h
         Dx[-(i-1),-(order+2):] = weights[:-1]
     return Dx
 
 
 def SecondOrderDifferenceMatrix1d(nx, h, order):
-    fdweights = Weights()
-    D_xx = sp.sparse.spdiags(jnp.tile(fdweights()(jnp.arange(order+1), order/2,2)/h**2,(nx,1)).T,
+    fdweights = Weights(2)
+    D_xx = sp.sparse.spdiags(jnp.tile(fdweights()(jnp.arange(order+1), order/2)/h**2,(nx,1)).T,
                              jnp.arange(-(order/2),(order/2)+1),(nx,nx)).tolil()
     for i in range(int(order/2)-1):
-        weights = fdweights()(jnp.arange(0,order+3),i+1,2)/h**2
+        weights = fdweights()(jnp.arange(0,order+3),i+1)/h**2
         D_xx[i,:order+2]=weights[1:]
 
-        weights = fdweights()(jnp.arange(order+3),order+2-(i+1),2)/h**2
+        weights = fdweights()(jnp.arange(order+3),order+2-(i+1))/h**2
         D_xx[-(i-1),-(order+2):]=weights[:-1]
     return D_xx
 
@@ -247,7 +247,6 @@ def HelmholtzMatrix(m,nx,ny,npml,h,fac,order,omega,form):
             - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sx.flatten()),0,(n,n))@Dxx \
             - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sy.flatten()),0,(n,n))@Dyy
     
-    #return H
     return jnp.array(H.todense())
 
 

@@ -83,11 +83,12 @@ def init_params_near_field(ax:jnp.float32, ay:jnp.float32, nxi:jnp.int32,
 
 @flax.struct.dataclass
 class NearField:
+    H: jax.Array
     omega: jnp.float32
     params: NearFieldParams
-    mext: jnp.ndarray
+    mext: jax.Array
     order: jnp.int32
-    get_Helm: jnp.bool_=False
+    tol:jnp.float32
     def __call__(self):
         def near_field_map(eta_vect_ext: jax.Array) -> jax.Array:
             """
@@ -95,21 +96,11 @@ class NearField:
             """
             Rhs = -(self.omega**2)\
                 *eta_vect_ext.reshape((-1,1))*self.params.u_i
-
-            H = HelmholtzMatrix(self.mext,self.params.fd_params.nx,
-                                self.params.fd_params.ny,
-                                self.params.fd_params.npml,
-                                self.params.fd_params.h, self.params.fd_params.SigmaMax,
-                                self.order, self.omega, 'compact_explicit')
             #u_ = sp.sparse.linalg.spsolve(H, Rhs)
-            tol = 1e-02
-            solver = vmap(partial(jsp.sparse.linalg.gmres, tol=tol), in_axes=[None, 1])
-            u_ = solver(H, Rhs)
+            solver = vmap(partial(jsp.sparse.linalg.gmres, tol=self.tol), in_axes=[None, 1])
+            u_ = solver(self.H, Rhs)[0].T
 
-            if self.get_Helm:
-                return u_, H
-            else:
-                return u_
+            return u_
         return near_field_map
 
 
@@ -132,12 +123,6 @@ def smoothing_solution(near_field,
 
 
     for i in range(n_theta):
-        #rbs_reals.append(sp.interpolate.RectBivariateSpline(params.fd_params.x,params.fd_params.y,
-        #                            near_field_real[:,i].reshape((params.fd_params.nx,params.fd_params.ny)).T))
-        #rbs_imags.append(sp.interpolate.RectBivariateSpline(params.fd_params.x,params.fd_params.y,
-        #                            near_field_imag[:,i].reshape((params.fd_params.nx,params.fd_params.ny)).T))
-        #Lambda_real = Lambda_real.at[:,i].set(rbs_reals[i].ev(points_query[:,0], points_query[:,1]))#, grid=False)
-        #Lambda_imag = Lambda_imag.at[:,i].set(rbs_imags[i].ev(points_query[:,0], points_query[:,1]))#, grid=False)
         Lambda_real = Lambda_real.at[:,i].set(interp2d(points_query[:,0], points_query[:,1],
                                     params.fd_params.x,params.fd_params.y,
                                     near_field_real[:,i].reshape((params.fd_params.nx,params.fd_params.ny)).T))
@@ -173,94 +158,102 @@ def get_projection_mat(params, n_theta, r):#
     return Projection_mat.reshape((n_theta, params.fd_params.nx*params.fd_params.ny))
 
 
-def misfit(eta_vect, params: NearFieldParams, Projection_mat, Data, order):
+@flax.struct.dataclass
+class MisFit(NearField):
+    Lambda: jax.Array
+    Projection_mat: jax.Array
 
-    m_vect = 1 + eta_vect
-
-
-    eta_vect_ext = ExtendModel(eta_vect, params.fd_params.nxi, params.fd_params.nyi,
-                               params.fd_params.npml)
-    mext = ExtendModel(m_vect, params.fd_params.nxi, params.fd_params.nyi,
-                       params.fd_params.npml)
-
-
-    #U, H1 = near_field_map(params, eta_vect_ext, mext, order, True)
-    near_field_ = NearField(params, mext, order, True)
-    U, H1 = near_field_()(eta_vect_ext)
-
-    scatter = Projection_mat@U
-
-    residual = Data - scatter
-
-    mis = 0.5*jnp.linalg.norm(residual)**2
-
-    U_tot = U + params.u_i
-
-    # computing the rhs for the adjoint system
-    rhs_adj = params.fd_params.omega**2*Projection_mat.T@residual
-    
-    # solving the adjoint system
-    #B_adj = sp.sparse.linalg.splu(H1.H)
-    #W_adj = B_adj.solve(rhs_adj)
-    #W_adj = sp.sparse.linalg.spsolve(H1.H, rhs_adj)
-    tol = 1e-02
-    solver = vmap(partial(jsp.sparse.linalg.gmres, tol=tol), in_axes=[None, 1])
-    W_adj = solver(H1.T, rhs_adj)
-    
-    # computing the gradient
-    grad = jnp.real(jnp.sum(np.conj(U_tot)*W_adj, axis=1))
-
-    # reshaping and extrating the gradient
-    grad = grad.reshape((params.fd_params.nx, params.fd_params.ny))
-    grad = grad[params.fd_params.npml:params.fd_params.npml+params.fd_params.nxi, params.fd_params.npml:params.fd_params.npml+params.fd_params.nyi]
-
-    dmis = grad.flatten()
-
-    return mis, dmis
+    def __call__(self):
+        def misfit(eta_vect):
+            m_vect = 1 + eta_vect
 
 
-def grad_misfit(eta_vect, params: NearFieldParams, Projection_mat, Data, order):
+            eta_vect_ext = ExtendModel(eta_vect, self.params.fd_params.nxi,
+                                       self.params.fd_params.nyi, self.params.fd_params.npml)
+            mext = ExtendModel(m_vect, self.params.fd_params.nxi, self.params.fd_params.nyi,
+                               self.params.fd_params.npml)
 
-    m_vect = 1 + eta_vect
+            near_field_ = NearField(self.H, self.omega, self.params, mext, self.order, self.tol)
+            U = near_field_()(eta_vect_ext)
+
+            scatter = self.Projection_mat@U
+
+            residual = self.Lambda - scatter
+
+            mis = 0.5*jnp.linalg.norm(residual)**2
+
+            U_tot = U + self.params.u_i
+
+            # computing the rhs for the adjoint system
+            rhs_adj = self.omega**2*self.Projection_mat.T@residual
+            
+            # solving the adjoint system
+            #B_adj = sp.sparse.linalg.splu(H1.H)
+            #W_adj = B_adj.solve(rhs_adj)
+            #W_adj = sp.sparse.linalg.spsolve(H1.H, rhs_adj)
+            solver = vmap(partial(jsp.sparse.linalg.gmres, tol=self.tol), in_axes=[None, 1])
+            W_adj = solver(self.H.T, rhs_adj)[0].T
+            
+            # computing the gradient
+            grad = jnp.real(jnp.sum(jnp.conj(U_tot)*W_adj, axis=1))
+
+            # reshaping and extrating the gradient
+            grad = grad.reshape((self.params.fd_params.nx, self.params.fd_params.ny))
+            grad = grad[self.params.fd_params.npml:self.params.fd_params.npml+self.params.fd_params.nxi, 
+                        self.params.fd_params.npml:self.params.fd_params.npml+self.params.fd_params.nyi]
+
+            dmis = grad.flatten()
+
+            return mis, dmis
+        return misfit
 
 
-    eta_vect_ext = ExtendModel(eta_vect, params.fd_params.nxi, params.fd_params.nyi,
-                               params.fd_params.npml)
-    mext = ExtendModel(m_vect, params.fd_params.nxi, params.fd_params.nyi,
-                       params.fd_params.npml)
+
+@flax.struct.dataclass
+class GradMisFit(MisFit):
+
+    def __call__(self):
+        def grad_misfit(eta_vect):
+
+            m_vect = 1 + eta_vect
 
 
-    #U, H1 = near_field_map(params, eta_vect_ext, mext, order, True)
-    near_field_ = NearField(params, mext, order, True)
-    U, H1 = near_field_()(eta_vect_ext)
+            eta_vect_ext = ExtendModel(eta_vect, self.params.fd_params.nxi,
+                                       self.params.fd_params.nyi, self.params.fd_params.npml)
+            mext = ExtendModel(m_vect, self.params.fd_params.nxi, self.params.fd_params.nyi,
+                               self.params.fd_params.npml)
 
-    scatter = Projection_mat@U
 
-    residual = Data - scatter
+            near_field_ = NearField(self.H, self.omega, self.params, mext, self.order, self.tol)
+            U = near_field_()(eta_vect_ext)
 
-    U_tot = U + params.u_i
+            scatter = self.Projection_mat@U
 
-    # computing the rhs for the adjoint system
-    rhs_adj = params.fd_params.omega**2*Projection_mat.T@residual
-    
-    # solving the adjoint system
-    #B_adj = sp.sparse.linalg.splu(H1.H)
-    #W_adj = B_adj.solve(rhs_adj)
-    #W_adj = sp.sparse.linalg.spsolve(H1.H, rhs_adj)
-    tol = 1e-02
-    solver = vmap(partial(jsp.sparse.linalg.gmres, tol=tol), in_axes=[None, 1])
-    W_adj = solver(H1.T, rhs_adj)
-    
-    # computing the gradient
-    grad = jnp.real(jnp.sum(jnp.conj(U_tot)*W_adj, axis=1))
+            residual = self.Lambda - scatter
 
-    # reshaping and extrating the gradient
-    grad = grad.reshape((params.fd_params.nx, params.fd_params.ny))
-    grad = grad[params.fd_params.npml:params.fd_params.npml+params.fd_params.nxi, params.fd_params.npml:params.fd_params.npml+params.fd_params.nyi]
+            U_tot = U + self.params.u_i
 
-    dmis = grad.flatten()
+            # computing the rhs for the adjoint system
+            rhs_adj = self.omega**2*self.Projection_mat.T@residual
+            
+            # solving the adjoint system
+            #B_adj = sp.sparse.linalg.splu(H1.H)
+            #W_adj = B_adj.solve(rhs_adj)
+            #W_adj = sp.sparse.linalg.spsolve(H1.H, rhs_adj)
+            solver = vmap(partial(jsp.sparse.linalg.gmres, tol=self.tol), in_axes=[None, 1])
+            W_adj = solver(self.H.T, rhs_adj)[0].T
+            
+            # computing the gradient
+            grad = jnp.real(jnp.sum(jnp.conj(U_tot)*W_adj, axis=1))
 
-    return dmis
+            # reshaping and extrating the gradient
+            grad = grad.reshape((self.params.fd_params.nx, self.params.fd_params.ny))
+            grad = grad[self.params.fd_params.npml:self.params.fd_params.npml+self.params.fd_params.nxi, self.params.fd_params.npml:self.params.fd_params.npml+self.params.fd_params.nyi]
+
+            dmis = grad.flatten()
+
+            return dmis
+        return grad_misfit
 
 
 def DisplayField(u,x,y,npml=None):
