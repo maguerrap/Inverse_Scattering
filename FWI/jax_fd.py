@@ -250,6 +250,26 @@ def HelmholtzMatrix(m,nx,ny,npml,h,fac,order,omega,form):
     return jnp.array(H.todense())
 
 
+def HelmholtzMatrix_off_diag(nx,ny,npml,h,fac,order,omega):
+    n = nx*ny
+    [sx, sy, sxp, syp] = DistribPML(nx,ny,npml,fac)
+    Dxx1d = SecondOrderDifferenceMatrix1d(nx,h,order)
+    Dyy1d = SecondOrderDifferenceMatrix1d(ny,h,order)
+    Dx1d = FirstOrderDifferenceMatrix1d(nx,h,order)
+    Dy1d = FirstOrderDifferenceMatrix1d(ny,h,order)  
+    Dx = sp.sparse.kron(Dx1d,sp.sparse.eye(ny))
+    Dy = sp.sparse.kron(sp.sparse.eye(nx),Dy1d)
+    Dxx = sp.sparse.kron(Dxx1d,sp.sparse.eye(ny))
+    Dyy = sp.sparse.kron(sp.sparse.eye(nx),Dyy1d)
+
+    H = sp.sparse.spdiags(-1j/(omega*(npml-1)*h)*sxp.flatten()/jnp.power(1-1j/omega*sx.flatten(),3),0,(n,n))@Dx \
+        + sp.sparse.spdiags(-1j/(omega*(npml-1)*h)*syp.flatten()/jnp.power(1-1j/omega*sy.flatten(),3),0,(n,n))@Dy \
+        - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sx.flatten()),0,(n,n))@Dxx \
+        - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sy.flatten()),0,(n,n))@Dyy
+    
+    return jnp.array(H.todense())
+
+
 def ExtendModel(m,nxint,nyint,npml):
     m = jnp.reshape(m,(nxint,nyint))
     nx = m.shape[0] + 2*npml

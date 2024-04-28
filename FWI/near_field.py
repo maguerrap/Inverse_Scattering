@@ -20,7 +20,7 @@ from interpax import interp2d
 from typing import NamedTuple
 
 from jax_fd import init_params, FiniteDiffParams
-from jax_fd import HelmholtzMatrix, ExtendModel
+from jax_fd import ExtendModel
 
 
 
@@ -83,11 +83,9 @@ def init_params_near_field(ax:jnp.float32, ay:jnp.float32, nxi:jnp.int32,
 
 @flax.struct.dataclass
 class NearField:
-    H: jax.Array
+    H_: jax.Array
     omega: jnp.float32
     params: NearFieldParams
-    mext: jax.Array
-    order: jnp.int32
     tol:jnp.float32
     def __call__(self):
         def near_field_map(eta_vect_ext: jax.Array) -> jax.Array:
@@ -96,9 +94,12 @@ class NearField:
             """
             Rhs = -(self.omega**2)\
                 *eta_vect_ext.reshape((-1,1))*self.params.u_i
+            m_ext = 1 + eta_vect_ext
+            M = jnp.diag(m_ext.flatten(),0)
+            H = self.H_ - self.omega**2*M
             #u_ = sp.sparse.linalg.spsolve(H, Rhs)
             solver = vmap(partial(jsp.sparse.linalg.gmres, tol=self.tol), in_axes=[None, 1])
-            u_ = solver(self.H, Rhs)[0].T
+            u_ = solver(H, Rhs)[0].T
 
             return u_
         return near_field_map
@@ -165,15 +166,11 @@ class MisFit(NearField):
 
     def __call__(self):
         def misfit(eta_vect):
-            m_vect = 1 + eta_vect
-
 
             eta_vect_ext = ExtendModel(eta_vect, self.params.fd_params.nxi,
                                        self.params.fd_params.nyi, self.params.fd_params.npml)
-            mext = ExtendModel(m_vect, self.params.fd_params.nxi, self.params.fd_params.nyi,
-                               self.params.fd_params.npml)
 
-            near_field_ = NearField(self.H, self.omega, self.params, mext, self.order, self.tol)
+            near_field_ = NearField(self.H_, self.omega, self.params, self.tol)
             U = near_field_()(eta_vect_ext)
 
             scatter = self.Projection_mat@U
@@ -187,12 +184,17 @@ class MisFit(NearField):
             # computing the rhs for the adjoint system
             rhs_adj = self.omega**2*self.Projection_mat.T@residual
             
+
+            m_ext = 1 + eta_vect_ext
+            M = jnp.diag(m_ext.flatten(),0)
+            H = self.H_ - self.omega**2*M
+
             # solving the adjoint system
             #B_adj = sp.sparse.linalg.splu(H1.H)
             #W_adj = B_adj.solve(rhs_adj)
             #W_adj = sp.sparse.linalg.spsolve(H1.H, rhs_adj)
             solver = vmap(partial(jsp.sparse.linalg.gmres, tol=self.tol), in_axes=[None, 1])
-            W_adj = solver(self.H.T, rhs_adj)[0].T
+            W_adj = solver(H.T, rhs_adj)[0].T
             
             # computing the gradient
             grad = jnp.real(jnp.sum(jnp.conj(U_tot)*W_adj, axis=1))
@@ -215,16 +217,10 @@ class GradMisFit(MisFit):
     def __call__(self):
         def grad_misfit(eta_vect):
 
-            m_vect = 1 + eta_vect
-
-
             eta_vect_ext = ExtendModel(eta_vect, self.params.fd_params.nxi,
                                        self.params.fd_params.nyi, self.params.fd_params.npml)
-            mext = ExtendModel(m_vect, self.params.fd_params.nxi, self.params.fd_params.nyi,
-                               self.params.fd_params.npml)
 
-
-            near_field_ = NearField(self.H, self.omega, self.params, mext, self.order, self.tol)
+            near_field_ = NearField(self.H_, self.omega, self.params, self.tol)
             U = near_field_()(eta_vect_ext)
 
             scatter = self.Projection_mat@U
@@ -236,12 +232,16 @@ class GradMisFit(MisFit):
             # computing the rhs for the adjoint system
             rhs_adj = self.omega**2*self.Projection_mat.T@residual
             
+            m_ext = 1 + eta_vect_ext
+            M = jnp.diag(m_ext.flatten(),0)
+            H = self.H_ - self.omega**2*M
+
             # solving the adjoint system
             #B_adj = sp.sparse.linalg.splu(H1.H)
             #W_adj = B_adj.solve(rhs_adj)
             #W_adj = sp.sparse.linalg.spsolve(H1.H, rhs_adj)
             solver = vmap(partial(jsp.sparse.linalg.gmres, tol=self.tol), in_axes=[None, 1])
-            W_adj = solver(self.H.T, rhs_adj)[0].T
+            W_adj = solver(H.T, rhs_adj)[0].T
             
             # computing the gradient
             grad = jnp.real(jnp.sum(jnp.conj(U_tot)*W_adj, axis=1))
