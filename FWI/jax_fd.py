@@ -1,3 +1,5 @@
+import jax.experimental
+import jax.experimental.sparse
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
@@ -247,7 +249,8 @@ def HelmholtzMatrix(m,nx,ny,npml,h,fac,order,omega,form):
             - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sx.flatten()),0,(n,n))@Dxx \
             - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sy.flatten()),0,(n,n))@Dyy
     
-    return jnp.array(H.todense())
+    return jax.experimental.sparse.BCOO.from_scipy_sparse(H)
+    return H
 
 
 def HelmholtzMatrix_off_diag(nx,ny,npml,h,fac,order,omega):
@@ -267,16 +270,17 @@ def HelmholtzMatrix_off_diag(nx,ny,npml,h,fac,order,omega):
         - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sx.flatten()),0,(n,n))@Dxx \
         - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sy.flatten()),0,(n,n))@Dyy
     
-    return jnp.array(H.todense())
+    #return jax.experimental.sparse.BCOO.from_scipy_sparse(H)
+    return H.todense()
 
 
 def ExtendModel(m,nxint,nyint,npml):
-    m = jnp.reshape(m,(nxint,nyint))
-    nx = m.shape[0] + 2*npml
-    ny = m.shape[1] + 2*npml
+    m_ = jnp.reshape(m,(nxint,nyint))
+    nx = m_.shape[0] + 2*npml
+    ny = m_.shape[1] + 2*npml
 
     mnew = jnp.zeros((nx,ny))
-    mnew = mnew.at[npml:nx-npml,npml:ny-npml].set(m)
+    mnew = mnew.at[npml:nx-npml,npml:ny-npml].set(m_)
     mnew = mnew.at[:npml,:].set(jnp.tile(mnew[npml,:],(npml,1)))
     mnew = mnew.at[-npml:,:].set(jnp.tile(mnew[-npml-1,:],(npml,1)))
     mnew = mnew.at[:,:npml].set(jnp.tile(mnew[:,npml],(npml,1)).T)
