@@ -271,7 +271,7 @@ def HelmholtzMatrix_off_diag(nx,ny,npml,h,fac,order,omega):
         - sp.sparse.spdiags(1./jnp.square(1-1j/omega*sy.flatten()),0,(n,n))@Dyy
     
     #return jax.experimental.sparse.BCOO.from_scipy_sparse(H)
-    return H.todense()
+    return jnp.array(H.todense())
 
 
 def ExtendModel(m,nxint,nyint,npml):

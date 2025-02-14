@@ -19,10 +19,11 @@ import flax
 
 from interpax import interp2d
 
+
 from typing import NamedTuple
 
-from FWI.jax_fd import init_params, FiniteDiffParams
-from FWI.jax_fd import ExtendModel
+from solver.jax_fd import init_params, FiniteDiffParams
+from solver.jax_fd import ExtendModel
 
 
 
@@ -32,11 +33,8 @@ def u_i_point(r, omega):
     # Delta G(x,y) + omega^2 G(x,y) = - delta (x,y)
     return (1j/4)*sp.special.hankel1(0,omega*r)
 
-def vu_i_plane(X, Y, S, omega):
+def u_i_plane(X, Y, S, omega):
     return jnp.exp(1j*omega*(jnp.outer(X.flatten(),S[:,0])+jnp.outer(Y.flatten(),S[:,1])))
-
-def u_i_plane(x, s, omega):
-    return jnp.exp(1j*omega*jnp.vdot(x, s))
 
 class NearFieldParams(NamedTuple):
     fd_params: FiniteDiffParams
@@ -62,18 +60,18 @@ def init_params_near_field_plane(ax:jnp.float32, ay:jnp.float32, nxi:jnp.int32,
     params = init_params(ax, ay, nxi, nyi, npml, SigmaMax)
 
     d_theta = jnp.pi*2/(n_theta)
-    theta = jnp.linspace(np.pi, 3*np.pi-d_theta, n_theta)
+    theta = jnp.linspace(jnp.pi, 3*jnp.pi-d_theta, n_theta)
 
     # defining the observation (and sampling) manifold
     S = r*jnp.concatenate((jnp.cos(theta).reshape((n_theta, 1)),\
                                   jnp.sin(theta).reshape((n_theta, 1))),\
                                   axis = 1)
-    
-    X = jnp.concatenate((params.X, params.Y))
+
     # here we are defining u_i function 
-    U_i = -vu_i_plane(params.X, params.Y, S, omega)
+    U_i = -u_i_plane(params.X, params.Y, S, omega)
 
     return NearFieldParams(params, U_i)
+
 
 def init_params_near_field_point(ax:jnp.float32, ay:jnp.float32, nxi:jnp.int32,
                            nyi:jnp.int32, npml:jnp.int32, r:jnp.float32,
@@ -93,7 +91,7 @@ def init_params_near_field_point(ax:jnp.float32, ay:jnp.float32, nxi:jnp.int32,
     params = init_params(ax, ay, nxi, nyi, npml, SigmaMax)
 
     d_theta = jnp.pi*2/(n_theta)
-    theta = jnp.linspace(np.pi, 3*np.pi-d_theta, n_theta)
+    theta = jnp.linspace(jnp.pi, 3*jnp.pi-d_theta, n_theta)
 
     # defining the observation (and sampling) manifold
     S = r*jnp.concatenate((jnp.cos(theta).reshape((n_theta, 1)),\
@@ -118,7 +116,6 @@ class NearField:
     params: NearFieldParams
     tol: jnp.float32
     def __call__(self):
-        @jit
         def near_field_map(eta_vect_ext: jax.Array) -> jax.Array:
             """
             function to compute the near field in a circle of radius 1
@@ -127,7 +124,6 @@ class NearField:
                 *eta_vect_ext.reshape((-1,1))*self.params.u_i
             M = jnp.diag((1 + eta_vect_ext).flatten())
             H = self.H_ - self.omega**2*M
-
             u_ = jnp.linalg.solve(H, Rhs)
 
             return u_
@@ -138,7 +134,7 @@ def smoothing_solution(near_field,
                        params: NearFieldParams,
                        n_theta, r):
     
-    dtheta = 2*np.pi/(n_theta)
+    dtheta = 2*jnp.pi/(n_theta)
     theta = dtheta*jnp.arange(n_theta)
     S = r*jnp.concatenate((jnp.cos(theta).reshape((n_theta, 1)),\
                                   jnp.sin(theta).reshape((n_theta, 1))),\
@@ -164,24 +160,32 @@ def smoothing_solution(near_field,
     return Lambda
 
 
-
 def get_projection_mat(params, n_theta, r):
-    dtheta = 2*jnp.pi/(n_theta)
-    theta = dtheta*jnp.arange(n_theta)
+    dtheta = 2 * jnp.pi / n_theta
+    theta = dtheta * jnp.arange(n_theta)
+    
+    # Compute points on the circle and query points
     S = r*jnp.concatenate((jnp.cos(theta).reshape((n_theta, 1)),\
                                   jnp.sin(theta).reshape((n_theta, 1))),\
                                   axis = 1)
-    points_query = 0.5*S
-    Projection_mat = jnp.zeros((n_theta, params.fd_params.nx, params.fd_params.ny))
-    for i in range(params.fd_params.nx):
-        for j in range(params.fd_params.ny):
-            mat_dummy = jnp.zeros((params.fd_params.nx, params.fd_params.ny))
-            mat_dummy = mat_dummy.at[j,i].set(1)
-            Projection_mat = Projection_mat.at[:,i,j].set(
-               interp2d(points_query[:,0], points_query[:,1],params.fd_params.x,params.fd_params.y,
-                                                     mat_dummy)
-                                                     )
-    return Projection_mat.reshape((n_theta, params.fd_params.nx*params.fd_params.ny))
+    points_query = 0.5 * S  # Scale down query points
+    
+    # Interpolation function: batched
+    def interpolate(i, j):
+        mat_dummy = jnp.zeros((params.fd_params.nx, params.fd_params.ny))
+        mat_dummy = mat_dummy.at[j,i].set(1)
+        return interp2d(points_query[:,0], points_query[:,1], params.fd_params.x, params.fd_params.y,
+                        mat_dummy)
+
+    # Vectorize the computation over all (i, j) indices
+    nx, ny = params.fd_params.nx, params.fd_params.ny
+    indices = jnp.array([(i, j) for i in range(nx) for j in range(ny)])
+    i_indices, j_indices = indices[:, 0], indices[:, 1]
+
+    # Vectorized computation of the projection matrix
+    Projection_mat = jax.vmap(interpolate)(i_indices, j_indices)
+    
+    return Projection_mat.T
 
 
 @flax.struct.dataclass
@@ -190,7 +194,6 @@ class MisFit(NearField):
     Projection_mat: jax.Array
 
     def __call__(self):
-        @jit
         def misfit(eta_vect):
 
             eta_vect_ext = ExtendModel(eta_vect, self.params.fd_params.nxi,
@@ -205,43 +208,12 @@ class MisFit(NearField):
 
             mis = 0.5*jnp.linalg.norm(residual)**2
 
-            #U_tot = U + self.params.u_i
 
-            # computing the rhs for the adjoint system
-            #rhs_adj = self.omega**2*self.Projection_mat.T@residual
-            
-
-            #m_ext = 1 + eta_vect_ext
-            #n = self.params.fd_params.nx*self.params.fd_params.ny
-            #M = jax.experimental.sparse.BCOO.fromdense(jnp.diag(m_ext.flatten(),0))
-            #M = jnp.diag((1 + eta_vect_ext).flatten())
-            #M = sp.sparse.spdiags(m_ext.flatten(),0,(n,n))
-            #H = self.H_ - self.omega**2*M
-
-            # solving the adjoint system
-            #B_adj = sp.sparse.linalg.splu(H.H)
-            #W_adj = B_adj.solve(rhs_adj)
-            #W_adj = sp.sparse.linalg.spsolve(H.T.conjugate(), rhs_adj)
-            #W_adj = jsp.sparse.linalg.bicgstab(H.T.conjugate(), rhs_adj)
-            #W_adj = jnp.linalg.solve(H.T.conjugate(), rhs_adj)
-            #solver = vmap(partial(jsp.sparse.linalg.gmres, tol=self.tol), in_axes=[None, 1])
-            #W_adj = solver(H.T, rhs_adj)[0].T
-            
-            # computing the gradient
-            #grad = jnp.real(jnp.sum(jnp.conj(U_tot)*W_adj, axis=1))
-
-            # reshaping and extrating the gradient
-            #grad = grad.reshape((self.params.fd_params.nx, self.params.fd_params.ny))
-            #grad = grad[self.params.fd_params.npml:self.params.fd_params.npml+self.params.fd_params.nxi, 
-            #            self.params.fd_params.npml:self.params.fd_params.npml+self.params.fd_params.nyi]
-
-            #dmis = grad.flatten()
-
-            return mis#, dmis
+            return mis
         return misfit
 
 
-
+"""
 @flax.struct.dataclass
 class GradMisFit(MisFit):
 
@@ -277,7 +249,7 @@ class GradMisFit(MisFit):
             #W_adj = solver(H.T, rhs_adj)[0].T
             
             # computing the gradient
-            grad = jnp.real(jnp.sum(np.conj(U_tot)*W_adj, axis=1))
+            grad = jnp.real(jnp.sum(jnp.conj(U_tot)*W_adj, axis=1))
 
             # reshaping and extrating the gradient
             grad = grad.reshape((self.params.fd_params.nx, self.params.fd_params.ny))
@@ -287,7 +259,7 @@ class GradMisFit(MisFit):
 
             return dmis
         return grad_misfit
-
+"""
 
 def DisplayField(u,x,y,npml=None):
     nx = x.shape[0]
@@ -295,7 +267,7 @@ def DisplayField(u,x,y,npml=None):
     h = x[1]-x[0]
     u_plot = u.reshape((ny,nx))
     if npml is None:
-        if jnp.all(np.isreal(u_plot)):
+        if jnp.all(jnp.isreal(u_plot)):
             plt.imshow(u_plot)
             plt.colorbar()
             plt.show()
@@ -309,7 +281,7 @@ def DisplayField(u,x,y,npml=None):
             plt.show()
     else:
         u_plot = u.reshape((ny,nx))
-        if jnp.all(np.isreal(u_plot)):
+        if jnp.all(jnp.isreal(u_plot)):
             plt.imshow(u_plot)
             plt.colorbar()
             plt.show()
