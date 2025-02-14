@@ -1,1 +1,3 @@
-# probabilistic_inverse_scattering
+# Inverse Scattering
+
+Inverse scattering solver using finite differences.
